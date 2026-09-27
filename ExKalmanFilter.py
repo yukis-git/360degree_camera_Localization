@@ -1,3 +1,4 @@
+import argparse
 import cv2
 import cv2.aruco as aruco
 import matplotlib.pyplot as plt
@@ -434,10 +435,11 @@ class World():
 
 
 class Processing():
-    def __init__(self, vision_pass, map_pass):
+    def __init__(self, vision_pass, map_pass, save_path=None):
         self.world = World(vision_pass=vision_pass, map_pass=map_pass)
         self.map_pass = map_pass # Store map_pass
-        self.save = False
+        self.save = save_path is not None
+        self.save_path = save_path
 
     def play(self):
         self.world.settings()
@@ -447,7 +449,7 @@ class Processing():
                                 interval=int(self.world.time_interval*1000),
                                 repeat=False, save_count=self.world.totalframecount)
         if self.save:
-            ani.save(r"G:\test.mp4", writer="ffmpeg")
+            ani.save(self.save_path, writer="ffmpeg")
             plt.close(self.world.fig)
         else: plt.show()
     
@@ -464,8 +466,18 @@ class Processing():
             return
 
 
-if __name__ == '__main__':
+def main():
+    parser = argparse.ArgumentParser(description="拡張カルマンフィルタ (四元数, EKF) による360度カメラの自己位置推定")
+    parser.add_argument('--video', default=r"C:\Users\sakata\Documents\SLAM\map_base\VID_20250826_171914_00_012.mp4",
+                        help="入力動画のパス")
+    parser.add_argument('--map', default=r"C:\Users\sakata\Documents\SLAM\map_base\map_20250826.csv",
+                        help="ランドマークマップ (CSV) のパス")
+    parser.add_argument('--save', default=None, metavar='PATH',
+                        help="指定すると、表示せずにこのパスへアニメーションを保存する (未指定なら画面表示のみ)")
+    args = parser.parse_args()
 
-    vision_pass = r"C:\Users\sakata\Documents\SLAM\map_base\VID_20250826_171914_00_012.mp4"
-    map_pass = r"C:\Users\sakata\Documents\SLAM\map_base\map_20250826.csv"
-    Processing(vision_pass=vision_pass, map_pass=map_pass).play()
+    Processing(vision_pass=args.video, map_pass=args.map, save_path=args.save).play()
+
+
+if __name__ == '__main__':
+    main()

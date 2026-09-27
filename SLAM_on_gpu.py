@@ -399,8 +399,20 @@ class EKF_SLAM:
         ax.set_box_aspect((xmax-xmin,ymax-ymin,zmax-zmin))
 
 
-if __name__ == '__main__':
-    vision_pass = r"C:\Users\sakata\Documents\VID_20250909_110359_00_023.mp4"
-    # vision_pass = r"C:\Users\sakata\Documents\VID_20250826_171914_00_012.mp4"
-    world = World(vision_pass, threshold=150, save=False)
+def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="EKF-SLAM (360度カメラ) 実行スクリプト")
+    parser.add_argument('--video', default=r"C:\Users\sakata\Documents\VID_20250909_110359_00_023.mp4",
+                        help="入力動画のパス")
+    parser.add_argument('--threshold', type=float, default=150,
+                        help="新規ランドマーク登録のしきい値")
+    parser.add_argument('--save', action=argparse.BooleanOptionalAction, default=False,
+                        help="アニメーションを保存する/しない")
+    args = parser.parse_args()
+
+    world = World(args.video, threshold=args.threshold, save=args.save)
     world.draw()
+
+
+if __name__ == '__main__':
+    main()
