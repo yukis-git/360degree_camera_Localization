@@ -17,7 +17,7 @@ def Rotate_mat(Sr, Cr, Sp, Cp, Sy, Cy):
 # 修正箇所
 def P_roll_Rotate(Sr, Cr, Sp, Cp, Sy, Cy):
     return np.array([[0, Cy*Sp*Cr+Sy*Sr, -Cy*Sp*Sr+Sy*Cr],
-                     [0, Sy*Sp*Cr-Cy*Sr, -Sy*Sp*Cr-Cy*Cr],
+                     [0, Sy*Sp*Cr-Cy*Sr, -Sy*Sp*Sr-Cy*Cr],  # 修正: d/dr(Sy*Sp*Cr-Cy*Sr) = -Sy*Sp*Sr-Cy*Cr
                      [0, Cp*Cr, -Cp*Sr]])
 
 # 修正箇所
@@ -35,7 +35,8 @@ def P_yaw_Rotate(Sr, Cr, Sp, Cp, Sy, Cy):
 class World:
     def __init__(self, vision_pass, threshold, save=False):
         self.cap = cv2.VideoCapture(vision_pass)
-        self.time_interval = 1/self.cap.get(cv2.CAP_PROP_FPS)
+        fps = self.cap.get(cv2.CAP_PROP_FPS)
+        self.time_interval = 1/fps if fps > 0 else 1/30  # FPS が取得できない場合のゼロ除算対策
         self.totalframecount = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
         self.picv = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         self.fast = cv2.FastFeatureDetector_create(threshold=threshold, nonmaxSuppression=True)
@@ -100,7 +101,7 @@ class Observation:
         return current_frame_coords
 
     def _trans_func_vectorized(self, corners, picv):
-            if isinstance(corners, np.ndarray): corners = np.array(corners)
+            if not isinstance(corners, np.ndarray): corners = np.asarray(corners, dtype=float)
             if corners.size == 0: return np.array([]).reshape(0, 2)
 
             p_val, q_val = picv * 0.5, picv * 0.5
@@ -206,7 +207,9 @@ class EKF_SLAM:
         return pose_jacobian_all, lm_jacobian_core_all
 
     def matQ(self):
-        return np.diag([np.cos(self.direction_dev)**2, np.sin(2*self.direction_dev)/2, np.sin(self.direction_dev)])
+        # 単位方向ベクトルの各成分の誤差分散 ~ (角度誤差)^2。
+        # 旧式 diag[cos^2, sin(2d)/2, sin(d)] は x 成分の分散が ~1 となり x 成分の観測がほぼ無視されていた
+        return np.eye(3) * self.direction_dev**2
 
 
     def get_LM_Pos_from_state(self, id):
@@ -234,7 +237,11 @@ class EKF_SLAM:
         zp = Observation.observation_function_vectorized(self.believe[:6], lm[np.newaxis, :]).squeeze()
         y = z - zp
         
-        S = self.matQ() + H_for_single_lm @ self.cov @ H_for_single_lm.T
+        # H の非ゼロ列 (姿勢 + 対象ランドマーク) だけで S を計算
+        lm_start = self.pose_size + lmid * self.lm_size
+        cols = np.r_[0:self.pose_size, lm_start:lm_start + self.lm_size]
+        Hs = H_for_single_lm[:, cols]
+        S = self.matQ() + Hs @ self.cov[np.ix_(cols, cols)] @ Hs.T
         
         return y, S, H_for_single_lm
 
@@ -255,29 +262,22 @@ class EKF_SLAM:
         pose_jacobian_core_all, lm_jacobian_core_all = self._matH_vectorized(
             self.believe[:3], all_lm_positions, R_mat.T, Proll_mat.T, Ppitch_mat.T, Pyaw_mat.T)
 
-        total_state_size = self.pose_size + self.nLM * self.lm_size
-        H_all = np.zeros((self.nLM, self.lm_size, total_state_size), dtype=float)
-
-        H_all[:, :, :self.pose_size] = pose_jacobian_core_all
-
-        if self.nLM > 0:
-            col_start_indices = self.pose_size + np.arange(self.nLM) * self.lm_size
-            
-            row_indices_H = np.arange(self.nLM)
-            inner_row_indices = np.arange(self.lm_size)
-            inner_col_indices = inner_row_indices
-            
-            global_col_indices = (col_start_indices[:, np.newaxis, np.newaxis] + inner_col_indices[np.newaxis, np.newaxis, :])
-            
-            H_all[row_indices_H[:, np.newaxis, np.newaxis],
-                  inner_row_indices[np.newaxis, :, np.newaxis],
-                  global_col_indices] = lm_jacobian_core_all
-
         zps = Observation.observation_function_vectorized(self.believe[:6], all_lm_positions)
         ys = z - zps
 
+        # H_i は姿勢列(6)と自身のランドマーク列(3)以外ゼロなので、密な H_all (nLM x 3 x N) を作らず
+        # 共分散のブロックだけで S_i = Q + H_i P H_i^T を計算する (O(nLM^3) -> O(nLM))
+        Hp, Hl = pose_jacobian_core_all, lm_jacobian_core_all
+        ps = self.pose_size
+        P_pp = self.cov[:ps, :ps]
+        P_pl = self.cov[:ps, ps:].reshape(ps, self.nLM, self.lm_size).transpose(1, 0, 2)  # (nLM, 6, 3)
+        lm_idx = np.arange(self.nLM)
+        P_ll = self.cov[ps:, ps:].reshape(self.nLM, self.lm_size, self.nLM, self.lm_size)[lm_idx, :, lm_idx, :]  # (nLM, 3, 3)
+        HpT, HlT = np.transpose(Hp, (0, 2, 1)), np.transpose(Hl, (0, 2, 1))
+        cross = Hp @ P_pl @ HlT
         Q_mat = self.matQ()
-        S_all = Q_mat[np.newaxis, :, :] + H_all @ self.cov @ np.transpose(H_all, (0, 2, 1))
+        S_all = (Q_mat[np.newaxis, :, :] + Hp @ P_pp @ HpT + cross + np.transpose(cross, (0, 2, 1))
+                 + Hl @ P_ll @ HlT)
 
         ys_reshaped = ys[:, :, np.newaxis]
         solve_results_all = np.linalg.solve(S_all, ys_reshaped)
@@ -369,7 +369,11 @@ class EKF_SLAM:
             else:
                 y, S, H = self.calc_innovation(lm, z, minid, R_mat, Proll_mat, Ppitch_mat, Pyaw_mat)
 
-                K = self.cov @ H.T @ np.linalg.inv(S)
+                # H は姿勢列とランドマーク minid の列のみ非ゼロ: 疎な列だけで cov @ H.T を計算 (O(N^2) -> O(N))
+                lm_start = self.pose_size + minid * self.lm_size
+                cols = np.r_[0:self.pose_size, lm_start:lm_start + self.lm_size]
+                PHt = self.cov[:, cols] @ H[:, cols].T
+                K = PHt @ np.linalg.inv(S)
                 new_believe = self.believe + K @ y
 
                 d_believe = new_believe - self.believe
@@ -377,7 +381,9 @@ class EKF_SLAM:
                       np.linalg.solve(self.cov[:self.pose_size, :self.pose_size], d_believe[:self.pose_size]))
 
                 if dm.item() < self.md_chi:
-                    new_cov = (np.eye(len(self.believe)) - K @ H) @ self.cov
+                    # (I - K H) P = P - K (P H^T)^T  (cov は対称)。丸め誤差で非対称化しないよう対称化する
+                    new_cov = self.cov - K @ PHt.T
+                    new_cov = (new_cov + new_cov.T) / 2
                     self.believe, self.cov = new_believe, new_cov
 
         self.poses.append(self.believe[:6])
@@ -409,9 +415,10 @@ class EKF_SLAM:
         if self.debug: print(f"camera pose : {self.believe[:6]}")
 
     def sigma_ellipse(self, ax, n=1):
-        eig_vals, eig_vec = np.linalg.eig(self.cov[:3, :3])
+        P_pp = (self.cov[:3, :3] + self.cov[:3, :3].T) / 2
+        eig_vals, eig_vec = np.linalg.eigh(P_pp)  # 対称行列なので eigh (eig は複素数を返し得る)
 
-        radii = n * np.sqrt(eig_vals)
+        radii = n * np.sqrt(np.clip(eig_vals, 0, None))
         u_grid, v_grid = np.meshgrid(np.linspace(0, 2*np.pi, 40), np.linspace(0, np.pi, 40))
 
         x_sphere = radii[0]*np.cos(u_grid)*np.sin(v_grid)
@@ -420,7 +427,8 @@ class EKF_SLAM:
 
         points_sphere = np.stack([x_sphere, y_sphere, z_sphere], axis=-1)
 
-        transformed_points = (points_sphere @ eig_vec + self.believe[:3])
+        # x = V diag(r) s の行ベクトル表現は s_r @ V.T (V を掛けると回転が逆になる)
+        transformed_points = (points_sphere @ eig_vec.T + self.believe[:3])
 
         return ax.plot_surface(transformed_points[..., 0],
                                transformed_points[..., 1],

@@ -34,7 +34,7 @@ while cap.isOpened():
     # マーカーの中心座標とIDをprintする処理
     # if ids is not None: # マーカーが1つ以上検出された場合
     observed = []
-    for i in range(len(ids)):
+    for i in range(len(ids) if ids is not None else 0):  # 未検出時 ids は None
         # i番目のマーカーのコーナーを取得 (corners[i]は (1, 4, 2) の形状)
         marker_corners = corners[i][0] # (4, 2) の配列になる (角の座標)
         

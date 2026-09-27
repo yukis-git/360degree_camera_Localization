@@ -227,7 +227,9 @@ class ExKalmanFilter:
         K = self.P @ H.T @ S_inv # Kalman gain (9x3行列)
 
         self.pose = self.pose + K @ innovation
-        self.P = (np.eye(9) - K @ H) @ self.P
+        # Joseph 形式: 丸め誤差があっても P の対称性・半正定値性が保たれる
+        I_KH = np.eye(9) - K @ H
+        self.P = I_KH @ self.P @ I_KH.T + K @ self.R @ K.T
 
         # 修正後のオイラー角を [-pi, pi] にラップ
         self.pose[0:3] = np.arctan2(np.sin(self.pose[0:3]), np.cos(self.pose[0:3]))
@@ -341,7 +343,7 @@ class Camera():
         
         try:
             P_pp = (P_pp + P_pp.T) / 2
-            eig_vals, eig_vec = np.linalg.eig(P_pp)
+            eig_vals, eig_vec = np.linalg.eigh(P_pp)  # 対称行列なので eigh (eig は複素数を返し得る)
         except np.linalg.LinAlgError:
             print("Warning: Covariance matrix for position not positive definite. Skipping sigma surface.")
             if self.sigma_surface is not None: self.sigma_surface.set_visible(False)

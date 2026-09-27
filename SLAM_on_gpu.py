@@ -19,7 +19,7 @@ def Rotate_mat(Sr, Cr, Sp, Cp, Sy, Cy):
 
 def P_roll_Rotate(Sr, Cr, Sp, Cp, Sy, Cy):
     return cp.vstack((cp.array([cp.array(0), Cy*Sp*Cr+Sy*Sr, -Cy*Sp*Sr+Sy*Cr], dtype=cp.float32),
-                      cp.array([cp.array(0), Sy*Sp*Cr-Cy*Sr, -Sy*Sp*Cr-Cy*Cr], dtype=cp.float32),
+                      cp.array([cp.array(0), Sy*Sp*Cr-Cy*Sr, -Sy*Sp*Sr-Cy*Cr], dtype=cp.float32),  # 修正: -Sy*Sp*Cr -> -Sy*Sp*Sr
                       cp.array([cp.array(0), Cp*Cr, -Cp*Sr], dtype=cp.float32)))
 
 def P_pitch_Rotate(Sr, Cr, Sp, Cp, Sy, Cy):
@@ -35,7 +35,8 @@ def P_yaw_Rotate(Sr, Cr, Sp, Cp, Sy, Cy):
 class World:
     def __init__(self, vision_pass, threshold, save=False):
         self.cap = cv2.VideoCapture(vision_pass)
-        self.time_interval = 1/self.cap.get(cv2.CAP_PROP_FPS)
+        fps = self.cap.get(cv2.CAP_PROP_FPS)
+        self.time_interval = 1/fps if fps > 0 else 1/30  # FPS が取得できない場合のゼロ除算対策
         self.totalframecount = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
         self.picv = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         self.fast = cv2.FastFeatureDetector_create(threshold=threshold, nonmaxSuppression=True)
@@ -216,7 +217,8 @@ class EKF_SLAM:
         return pose_jacobian_all, lm_jacobian_core_all
 
     def matQ(self):
-        return cp.diag(cp.array([cp.cos(self.direction_dev)**2, cp.sin(2*self.direction_dev)/2, cp.sin(self.direction_dev)]))
+        # 単位方向ベクトル各成分の誤差分散 ~ (角度誤差)^2 (旧式は x 成分の分散が ~1 で観測が効いていなかった)
+        return cp.eye(3) * self.direction_dev**2
 
     def get_LM_Pos_from_state(self, id):
         return self.believe[self.pose_size + self.lm_size*id: self.pose_size + self.lm_size*(id+1)]
@@ -343,7 +345,7 @@ class EKF_SLAM:
     def sigma_ellipse(self, ax, n=1):
         eig_vals, eig_vec = cp.linalg.eigh(self.cov[:3, :3])
 
-        radii = n * cp.sqrt(eig_vals)
+        radii = n * cp.sqrt(cp.clip(eig_vals, 0, None))
         u_grid, v_grid = cp.meshgrid(cp.linspace(0, 2*cp.pi, 40), cp.linspace(0, cp.pi, 40))
 
         x_sphere = radii[0]*cp.cos(u_grid)*cp.sin(v_grid)
@@ -352,7 +354,7 @@ class EKF_SLAM:
 
         points_sphere = cp.stack([x_sphere, y_sphere, z_sphere], axis=-1)
 
-        transformed_points = (points_sphere @ eig_vec + self.believe[:3]).get()
+        transformed_points = (points_sphere @ eig_vec.T + self.believe[:3]).get()
 
         return ax.plot_surface(transformed_points[..., 0],
                                transformed_points[..., 1],

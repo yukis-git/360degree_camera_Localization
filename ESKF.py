@@ -35,10 +35,10 @@ def quat_multiply(q1, q2):
 def quat_from_angle_axis(q):
     angle = np.linalg.norm(q)
     if angle < 1e-12: return np.array([1.0, 0.0, 0.0, 0.0])
-    q /= angle
+    axis = q / angle  # 旧実装は q /= angle で呼び出し元の配列 (delta_x のビュー) を書き換えていた
     half_angle = 0.5 * angle
     w = np.cos(half_angle)
-    xyz = q * np.sin(half_angle)
+    xyz = axis * np.sin(half_angle)
     return np.array([w, xyz[0], xyz[1], xyz[2]])
 
 
@@ -221,7 +221,14 @@ class ESKalmanFilter:
         self.pose[4:7] = p_nom_new
         self.pose[7:10] = v_nom_new
 
-        self.P = (self._I9 - K @ H_matrix) @ self.P
+        # Joseph 形式: 丸め誤差があっても P の対称性・半正定値性が保たれる
+        I_KH = self._I9 - K @ H_matrix
+        self.P = I_KH @ self.P @ I_KH.T + K @ self.R @ K.T
+
+        # ESKF のリセット: 誤差状態を名目状態へ注入した後、姿勢誤差の共分散を新しい名目姿勢の接空間へ写す
+        G = self._I9.copy()
+        G[0:3, 0:3] = self._I3 - skew(0.5 * dtheta)
+        self.P = G @ self.P @ G.T
 
     def matH_eskf(self, lm):
         q_nom = self.pose[0:4]
@@ -313,7 +320,7 @@ class Camera:
 
         try:
             P_pp = (P_pp + P_pp.T) / 2
-            eig_vals, eig_vec = np.linalg.eig(P_pp)
+            eig_vals, eig_vec = np.linalg.eigh(P_pp)  # 対称行列なので eigh (eig は複素数を返し得る)
         except np.linalg.LinAlgError:
             print("Warning: Covariance matrix for position not positive definite. Skipping sigma surface.")
             if self.sigma_surface is not None: self.sigma_surface.set_visible(False)
