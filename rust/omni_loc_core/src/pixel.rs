@@ -25,6 +25,25 @@
 //! function depending on the backend), so this module is split in two:
 //!   - `pixel_to_angles_*`: pure comparisons/arithmetic, no trig -- proven with Kani.
 //!   - `angles_to_bearing_*`: `sin`/`cos` calls -- covered by unit tests only.
+//!
+//! Kani-discovered edge case (fixed here, absent from the Python original): if `h`
+//! is allowed to be an arbitrarily small positive number, `pi / h` overflows to
+//! `+inf` in IEEE-754, and `inf * x` with `x == 0.0` (a valid pixel coordinate,
+//! since `x` ranges over `[0, 2h]`) evaluates to `NaN`, silently breaking the
+//! `[-pi, pi]` / `[-pi/2, pi/2]` range guarantee this module promises. The Python
+//! code never encounters this because `picv` is always a real image height (at
+//! least a handful of pixels). `MIN_HEIGHT` below makes that assumption explicit
+//! and rejects any `h` too small for the computation to stay well-scaled, instead
+//! of silently returning a `NaN`-poisoned angle pair.
+
+/// Minimum accepted image height, in pixels. Below this, `pi / h` risks
+/// overflowing to infinity and poisoning the computation with `NaN` (see the
+/// module-level Kani note). A real equirectangular image is always far larger
+/// than this in practice.
+pub const MIN_HEIGHT: f64 = 1.0;
+
+/// `f32` counterpart of [`MIN_HEIGHT`].
+pub const MIN_HEIGHT_F32: f32 = 1.0;
 
 /// Convert an equirectangular pixel coordinate to (azimuth, elevation) in radians,
 /// following `SLAM_on_cpu.py`'s `Observation._trans_func_vectorized`.
@@ -32,7 +51,7 @@
 /// `h` is the image height (`picv` in the Python code); the image width is `2*h`.
 ///
 /// Returns `None` when the input is invalid:
-///   - `h` is not finite or `h <= 0`
+///   - `h` is not finite or `h < MIN_HEIGHT` (this includes `h <= 0`)
 ///   - `x` or `y` is not finite
 ///   - `x` is outside `[0, 2*h]`
 ///   - `y` is outside `[0, h]`
@@ -42,7 +61,7 @@
 /// signalling an error -- see the module docs for the "simplified model" bug in
 /// `ExKalmanFilter.py`'s `calc_obs` for a related, unbounded-output edge case.
 pub fn pixel_to_angles_f64(x: f64, y: f64, h: f64) -> Option<(f64, f64)> {
-    if !h.is_finite() || h <= 0.0 || !x.is_finite() || !y.is_finite() {
+    if !h.is_finite() || h < MIN_HEIGHT || !x.is_finite() || !y.is_finite() {
         return None;
     }
     if x < 0.0 || x > 2.0 * h || y < 0.0 || y > h {
@@ -65,7 +84,7 @@ pub fn pixel_to_angles_f64(x: f64, y: f64, h: f64) -> Option<(f64, f64)> {
 
 /// `f32` counterpart of [`pixel_to_angles_f64`].
 pub fn pixel_to_angles_f32(x: f32, y: f32, h: f32) -> Option<(f32, f32)> {
-    if !h.is_finite() || h <= 0.0 || !x.is_finite() || !y.is_finite() {
+    if !h.is_finite() || h < MIN_HEIGHT_F32 || !x.is_finite() || !y.is_finite() {
         return None;
     }
     if x < 0.0 || x > 2.0 * h || y < 0.0 || y > h {
@@ -167,6 +186,19 @@ mod tests {
     }
 
     #[test]
+    fn tiny_positive_height_is_rejected() {
+        // A Kani-discovered edge case: a very small positive h would make
+        // pi/h overflow towards +inf, and inf * 0.0 (x = 0 is a valid pixel
+        // coordinate) evaluates to NaN. MIN_HEIGHT rejects this up front
+        // instead of returning a NaN-poisoned angle pair.
+        assert!(pixel_to_angles_f64(0.0, 0.0, 1e-300).is_none());
+        assert!(pixel_to_angles_f64(0.0, 0.0, f64::MIN_POSITIVE).is_none());
+        assert!(pixel_to_angles_f32(0.0, 0.0, 1e-30).is_none());
+        // Exactly at the floor is fine.
+        assert!(pixel_to_angles_f64(0.0, 0.0, MIN_HEIGHT).is_some());
+    }
+
+    #[test]
     fn bearing_is_unit_length() {
         let h = 240.0_f64;
         let (x, y, z) = pixel_to_bearing_f64(100.0, 50.0, h).unwrap();
@@ -204,8 +236,15 @@ mod tests {
 mod kani_proofs {
     use super::*;
 
-    const BOUND: f64 = 1.0e6;
-    const BOUND32: f32 = 1.0e6;
+    // Fully-symbolic f64/f32 comparisons and divisions (`x < 1.5*h`, `pi/h`, ...)
+    // are already expensive for CBMC's bit-precise IEEE-754 encoding; a wide
+    // numeric bound (e.g. 1e6) made these proofs not finish within a 240s-300s
+    // budget even after fixing the NaN bug below. `BOUND` is kept small enough
+    // to be tractable while still covering the interesting structure (branch
+    // boundary at 1.5*h, seam at x=0/2h, MIN_HEIGHT edge). See README.md
+    // "制限事項" section.
+    const BOUND: f64 = 50.0;
+    const BOUND32: f32 = 50.0;
 
     fn bounded_f64() -> f64 {
         let v: f64 = kani::any();
@@ -221,20 +260,41 @@ mod kani_proofs {
         v
     }
 
+    /// A height bounded away from zero (`>= MIN_HEIGHT`), so `pi / h` cannot
+    /// overflow. See the module-level Kani note: without this floor, `h` could
+    /// be an arbitrarily small positive number, making `pi / h` overflow to
+    /// infinity and `inf * 0.0` (a valid `x == 0` pixel) evaluate to `NaN`.
+    fn bounded_f64_height() -> f64 {
+        let v: f64 = kani::any();
+        kani::assume(v.is_finite());
+        kani::assume(v >= MIN_HEIGHT && v <= BOUND);
+        v
+    }
+
+    fn bounded_f32_height() -> f32 {
+        let v: f32 = kani::any();
+        kani::assume(v.is_finite());
+        kani::assume(v >= MIN_HEIGHT_F32 && v <= BOUND32);
+        v
+    }
+
     /// No panic for any finite bounded input, and when valid the angles land in
     /// the documented ranges: azimuth in [-pi, pi], elevation in [-pi/2, pi/2].
     #[kani::proof]
     fn pixel_to_angles_f64_in_range_or_none() {
         let x = bounded_f64();
         let y = bounded_f64();
-        let h = bounded_f64();
+        let h = bounded_f64_height();
 
         let result = pixel_to_angles_f64(x, y, h);
 
         if let Some((az, el)) = result {
             let pi = core::f64::consts::PI;
-            // Small epsilon for floating point rounding at the exact boundary.
-            let eps = 1e-9 * (1.0 + BOUND);
+            // With h >= MIN_HEIGHT, both pi/h*x and pi/h*y stay of order ~pi in
+            // magnitude (mathematically exactly bounded by the valid-input
+            // constraints checked inside the function), so a small fixed
+            // epsilon covers floating point rounding at the boundary.
+            let eps = 1e-9;
             assert!(az >= -pi - eps && az <= pi + eps);
             assert!(el >= -pi / 2.0 - eps && el <= pi / 2.0 + eps);
         }
@@ -244,20 +304,20 @@ mod kani_proofs {
     fn pixel_to_angles_f32_in_range_or_none() {
         let x = bounded_f32();
         let y = bounded_f32();
-        let h = bounded_f32();
+        let h = bounded_f32_height();
 
         let result = pixel_to_angles_f32(x, y, h);
 
         if let Some((az, el)) = result {
             let pi = core::f32::consts::PI;
-            let eps = 1e-3 * (1.0 + BOUND32);
+            let eps = 1e-4;
             assert!(az >= -pi - eps && az <= pi + eps);
             assert!(el >= -pi / 2.0 - eps && el <= pi / 2.0 + eps);
         }
     }
 
-    /// Invalid inputs (out-of-range pixel coordinates, non-positive height) must
-    /// return `None`, never a silently-wrong angle pair.
+    /// Invalid inputs (out-of-range pixel coordinates, too-small/non-positive
+    /// height) must return `None`, never a silently-wrong angle pair.
     #[kani::proof]
     fn invalid_inputs_yield_none() {
         let x = bounded_f64();
@@ -265,7 +325,7 @@ mod kani_proofs {
         let h = bounded_f64();
 
         // Force at least one invalid condition.
-        kani::assume(x < 0.0 || x > 2.0 * h || y < 0.0 || y > h || h <= 0.0);
+        kani::assume(x < 0.0 || x > 2.0 * h || y < 0.0 || y > h || h < MIN_HEIGHT);
 
         assert!(pixel_to_angles_f64(x, y, h).is_none());
     }
@@ -273,8 +333,7 @@ mod kani_proofs {
     /// Non-finite input must return `None`.
     #[kani::proof]
     fn non_finite_yields_none() {
-        let h: f64 = kani::any();
-        kani::assume(h.is_finite() && h > 0.0 && h <= BOUND);
+        let h = bounded_f64_height();
         assert!(pixel_to_angles_f64(f64::NAN, 0.0, h).is_none());
         assert!(pixel_to_angles_f64(0.0, f64::NAN, h).is_none());
         assert!(pixel_to_angles_f64(0.0, 0.0, f64::NAN).is_none());
