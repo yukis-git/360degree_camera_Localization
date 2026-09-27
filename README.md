@@ -14,12 +14,16 @@ python3 ESKF.py --video path/to/video.mp4 --map path/to/map.csv
 # 画面表示せず動画として保存
 python3 ESKF.py --video path/to/video.mp4 --map path/to/map.csv --save output.mp4
 
-# EKF-SLAM (CPU版) を実行 (しきい値・保存有無も指定可能)
-python3 SLAM_on_cpu.py --video path/to/video.mp4 --threshold 100 --save
+# EKF-SLAM (CPU版): ORB 特徴点 (1フレーム最大 --max-features 個) を記述子で対応付け
+python3 SLAM_on_cpu.py --video path/to/video.mp4 --threshold 100 --max-features 100 --save
 python3 SLAM_on_cpu.py --video path/to/video.mp4 --no-save
 ```
 
 `--help` で各スクリプトの引数一覧を確認できます (例: `python3 ESKF.py --help`)。
+
+ESKF のプロセスノイズは連続時間の強度で与え、フレーム間隔 dt を掛けて使います
+(`ESKalmanFilter(map, q_theta=0.1, q_pos=1e-4, q_vel=0.1)`)。カメラの回転が速い場合は `q_theta` を大きくしてください。
+GPU 版 `SLAM_on_gpu.py` は旧来の FAST 特徴点のままで、ORB 対応付けとランドマークの間引きは CPU 版のみです。
 
 ## 検証・テスト
 

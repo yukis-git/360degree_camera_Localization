@@ -402,8 +402,8 @@ def main():
     parser = argparse.ArgumentParser(description="EKF-SLAM (360度カメラ) 実行スクリプト")
     parser.add_argument('--video', default=r"C:\Users\sakata\Documents\VID_20250909_110359_00_023.mp4",
                         help="入力動画のパス")
-    parser.add_argument('--threshold', type=float, default=150,
-                        help="新規ランドマーク登録のしきい値")
+    parser.add_argument('--threshold', type=int, default=150,
+                        help="FAST のコーナー検出しきい値")
     parser.add_argument('--save', action=argparse.BooleanOptionalAction, default=False,
                         help="アニメーションを保存する/しない")
     args = parser.parse_args()
