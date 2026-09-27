@@ -33,13 +33,14 @@ def P_yaw_Rotate(Sr, Cr, Sp, Cp, Sy, Cy):
                      [0, 0, 0]])
 
 class World:
-    def __init__(self, vision_pass, threshold, save=False):
+    def __init__(self, vision_pass, threshold, save=False, max_features=100):
         self.cap = cv2.VideoCapture(vision_pass)
         fps = self.cap.get(cv2.CAP_PROP_FPS)
         self.time_interval = 1/fps if fps > 0 else 1/30  # FPS が取得できない場合のゼロ除算対策
         self.totalframecount = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
         self.picv = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        self.fast = cv2.FastFeatureDetector_create(threshold=threshold, nonmaxSuppression=True)
+        # FAST (記述子なし) -> ORB: 記述子で対応付けでき、1フレームの特徴点数も max_features で上限を設ける
+        self.detector = cv2.ORB_create(nfeatures=max_features, fastThreshold=threshold)
         self.scale = 0.2
         self.estimator = EKF_SLAM(picv=self.picv)
         self.observation = Observation()
@@ -69,11 +70,11 @@ class World:
 
             time = self.time_interval*i
 
-            current_frame_coords = self.observation.preprocessing(frame, self.picv, self.scale, self.fast)
+            current_frame_coords, descriptors = self.observation.preprocessing(frame, self.picv, self.scale, self.detector)
             observation = self.observation.data(self.picv, current_frame_coords)
             self.estimator.motion_update(self.time_interval)
             start = Time.time()
-            self.estimator.observation_update(observation)
+            self.estimator.observation_update(observation, descriptors)
             end = Time.time()
             self.estimator.draw(ax, time)
             print(end - start)
@@ -85,20 +86,22 @@ class Observation:
         self.debug = debug
 
     @staticmethod # ここを修正
-    def preprocessing(frame, picv, scale, fast):
+    def preprocessing(frame, picv, scale, detector):
+        '''特徴点の画素座標 (N,2) と ORB 記述子 (N,32) uint8 を返す'''
         gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         mask = np.zeros_like(gray_frame, dtype=np.uint8)
         mask[int(picv*5/12):int(picv*7/12), 0:int(2*picv)] = 255
-        kp = fast.detect(gray_frame, mask)
-        current_frame_coords = np.array([point.pt for point in kp])
+        kp, descriptors = detector.detectAndCompute(gray_frame, mask)
+        if descriptors is None: kp, descriptors = (), np.zeros((0, 32), dtype=np.uint8)
+        current_frame_coords = np.array([point.pt for point in kp]).reshape(-1, 2)
         frame_with_kp = cv2.drawKeypoints(frame, kp, None, color=(0, 255, 0), flags=0)
         # text = f"FAST Corners: {len(kp)}"
         # cv2.putText(frame_with_kp, text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2, cv2.LINE_AA)
         width, height = int(frame_with_kp.shape[1] * scale), int(frame_with_kp.shape[0] * scale)
         resized_frame = cv2.resize(frame_with_kp, (width, height), interpolation=cv2.INTER_LINEAR)
         # if self.monitor and self.save is False: cv2.imshow('FAST Corner Detection in Video', resized_frame)
-        cv2.imshow('FAST Corner Detection in Video', resized_frame)
-        return current_frame_coords
+        cv2.imshow('ORB Features in Video', resized_frame)
+        return current_frame_coords, descriptors
 
     def _trans_func_vectorized(self, corners, picv):
             if not isinstance(corners, np.ndarray): corners = np.asarray(corners, dtype=float)
@@ -155,7 +158,12 @@ class Observation:
 
 
 class EKF_SLAM:
-    def __init__(self, picv, debug=False):
+    def __init__(self, picv, debug=False, hamming_th=64, prune_age=30, prune_min_hits=2):
+        '''
+        hamming_th     : ORB 記述子 (256bit) の一致とみなすハミング距離の上限
+        prune_age      : 生成からこのフレーム数経っても
+        prune_min_hits : この回数未満しか再観測されないランドマークは削除する
+        '''
         self.direction_dev = 10*np.pi/picv
         self.believe = np.asarray(np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0]))
         self.cov = np.diag([1, 1, 1, np.pi/6, np.pi/6, np.pi/6])
@@ -164,19 +172,25 @@ class EKF_SLAM:
         self.lm_size = 3
         self.nLM = 0
         self.md_chi = chi2.ppf(0.95, self.pose_size)
-        self.M_DIST_TH = chi2.ppf(0.01, 3)
+        # 対応付けゲート: 正しい対応の 99% を受理する (旧 chi2.ppf(0.01, 3)~0.11 は正しい対応もほぼ棄却していた)
+        self.M_DIST_TH = chi2.ppf(0.99, 3)
         self.Duplication = chi2.ppf(0.001, 3)
         self.color = "blue"
         self.debug = debug
+        # ランドマークごとの付随情報 (状態ベクトルの並びと常に同期させる)
+        self.hamming_th, self.prune_age, self.prune_min_hits = hamming_th, prune_age, prune_min_hits
+        self.lm_desc = np.zeros((0, 32), dtype=np.uint8)  # ORB 記述子
+        self.lm_hits = np.zeros(0, dtype=int)             # 既存ランドマークとして対応付いた回数
+        self.lm_born = np.zeros(0, dtype=int)             # 生成フレーム
+        self.frame = 0
 
     def motion_update(self, time_interval):
+        # ランドマークは静止しているのでプロセスノイズは姿勢ブロックにだけ加える
+        # (旧実装はランドマークにも毎秒分散 1 を加えており、地図が時間とともにぼやけていた。
+        #  使われないランドマークの削除は observation_update の再観測回数による間引きで行う)
         motion_noise_diag = np.array([1, 1, 1, np.pi/6, np.pi/6, np.pi/6])
-        if self.nLM == 0: new_cov_noise = np.diag(motion_noise_diag)
-        else:
-            lm_variance_list = np.ones(self.nLM * self.lm_size)
-            new_cov_noise = np.diag(np.concatenate((motion_noise_diag, lm_variance_list)))
-
-        self.cov = self.cov + time_interval * new_cov_noise
+        ps = self.pose_size
+        self.cov[:ps, :ps] += time_interval * np.diag(motion_noise_diag)
 
     def _matH_vectorized(self, cam_pos, all_lm_positions, R_mat_T, Proll_mat_T, Ppitch_mat_T, Pyaw_mat_T):
         nLM_batch = all_lm_positions.shape[0]
@@ -245,7 +259,11 @@ class EKF_SLAM:
         
         return y, S, H_for_single_lm
 
-    def search_correspond_LM_ID(self, z):
+    def search_correspond_LM_ID(self, z, desc=None):
+        '''
+        観測 z に対応するランドマーク番号を返す (新規なら self.nLM)。
+        desc (ORB 記述子) が与えられた場合は、記述子が一致するランドマークだけを候補にする。
+        '''
         if self.nLM == 0: return self.nLM
 
         roll, pitch, yaw = self.believe[3:6]
@@ -284,9 +302,15 @@ class EKF_SLAM:
 
         mahalanobis_distances = np.sum(ys_reshaped.transpose(0, 2, 1) @ solve_results_all, axis=(1, 2))
 
+        # 記述子が一致しないランドマークは対応候補から外す (幾何だけの最近傍より誤対応が大幅に減る)
+        match_distances = mahalanobis_distances
+        if desc is not None:
+            hamming = np.unpackbits(np.bitwise_xor(self.lm_desc, desc[np.newaxis, :]), axis=1).sum(axis=1)
+            match_distances = np.where(hamming <= self.hamming_th, mahalanobis_distances, np.inf)
+
         # 最小のマハラノビス距離を持つランドマークを見つける
-        minid_candidate = np.argmin(mahalanobis_distances)
-        minmd_actual = mahalanobis_distances[minid_candidate]
+        minid_candidate = np.argmin(match_distances)
+        minmd_actual = match_distances[minid_candidate]
 
         delete_candidates_mask = (mahalanobis_distances < self.Duplication)
         
@@ -297,21 +321,10 @@ class EKF_SLAM:
         indices_to_delete_lm = np.where(delete_candidates_mask)[0]
 
         if len(indices_to_delete_lm) > 0:
-            base_indices = self.pose_size + indices_to_delete_lm * self.lm_size
-            offset = np.arange(self.lm_size)
-            global_indices_to_delete = (base_indices[:, np.newaxis] + offset).flatten()
-
             if self.debug:
                 print(f"Removing {len(indices_to_delete_lm)} landmarks (IDs: {indices_to_delete_lm}) due to small Mahalanobis distance but not being the closest.")
 
-            # self.believe と self.cov から削除
-            self.believe = np.delete(self.believe, global_indices_to_delete)
-            self.cov = np.delete(self.cov, global_indices_to_delete, axis=0)
-            self.cov = np.delete(self.cov, global_indices_to_delete, axis=1)
-            
-            # nLM を更新
-            self.nLM -= len(indices_to_delete_lm)
-            kept_lm_ids = np.where(~delete_candidates_mask)[0]
+            kept_lm_ids = self._delete_landmarks(delete_candidates_mask)
             if minid_candidate in kept_lm_ids:
                 new_minid_candidate = np.where(kept_lm_ids == minid_candidate)[0][0]
                 minid_candidate = new_minid_candidate
@@ -321,26 +334,44 @@ class EKF_SLAM:
     def calc_LM_Pos(self, z, R_mat):
         return self.believe[:3] + 5*np.dot(R_mat, z)
     
+    def _delete_landmarks(self, delete_mask):
+        '''
+        delete_mask (長さ nLM, True=削除) のランドマークを状態・共分散・付随情報からまとめて削除し、
+        残ったランドマークの元の番号 (昇順) を返す。削除処理はすべてここを通して同期を保つ。
+        '''
+        delete_mask = np.asarray(delete_mask, dtype=bool)
+        lm_ids = np.where(delete_mask)[0]
+        if len(lm_ids) > 0:
+            global_indices = (self.pose_size + lm_ids[:, np.newaxis] * self.lm_size + np.arange(self.lm_size)).ravel()
+            self.believe = np.delete(self.believe, global_indices)
+            self.cov = np.delete(np.delete(self.cov, global_indices, axis=0), global_indices, axis=1)
+            self.lm_desc = self.lm_desc[~delete_mask]
+            self.lm_hits = self.lm_hits[~delete_mask]
+            self.lm_born = self.lm_born[~delete_mask]
+            self.nLM -= len(lm_ids)
+        return np.where(~delete_mask)[0]
+
     def lm_delete(self, id):
-        lm_start_idx = self.pose_size + id * self.lm_size
-        indices_to_delete = np.arange(lm_start_idx, lm_start_idx + self.lm_size)
-        
-        self.believe = np.delete(self.believe, indices_to_delete)
-        
-        # 共分散行列 self.cov から対応する行と列を削除
-        self.cov = np.delete(self.cov, indices_to_delete, axis=0)
-        self.cov = np.delete(self.cov, indices_to_delete, axis=1)
-
-        self.nLM -= 1
+        mask = np.zeros(self.nLM, dtype=bool)
+        mask[id] = True
+        self._delete_landmarks(mask)
 
 
-    def observation_update(self, observation):
+    def observation_update(self, observation, descriptors=None):
+        '''
+        observation : (N,3) 観測方向の単位ベクトル
+        descriptors : (N,32) uint8 の ORB 記述子。None なら幾何 (マハラノビス距離) のみで対応付ける
+        '''
         initP = np.eye(self.lm_size)
+        self.frame += 1
+        if descriptors is not None and len(descriptors) != len(observation): descriptors = None
 
-        for z_input in observation:
+        for k, z_input in enumerate(observation):
             z = np.asarray(z_input)
+            desc = None if descriptors is None else descriptors[k]
 
-            minid = self.search_correspond_LM_ID(z)
+            minid = self.search_correspond_LM_ID(z, desc)
+            matched_existing = minid < self.nLM
 
             roll, pitch, yaw = self.believe[3:6]
             Sr, Cr = np.sin(roll), np.cos(roll)
@@ -360,7 +391,12 @@ class EKF_SLAM:
                                      np.hstack((np.zeros((self.lm_size, believe_len_cp), dtype=np.float32), initP))))
                 
                 self.believe, self.cov = new_believe, new_cov
+                self.lm_desc = np.vstack((self.lm_desc, np.zeros((1, 32), dtype=np.uint8) if desc is None else desc[np.newaxis, :]))
+                self.lm_hits = np.append(self.lm_hits, 0)
+                self.lm_born = np.append(self.lm_born, self.frame)
 
+            elif matched_existing:
+                self.lm_hits[minid] += 1
 
             # 既存のランドマークの更新処理
             lm = self.get_LM_Pos_from_state(minid)
@@ -389,28 +425,12 @@ class EKF_SLAM:
         self.poses.append(self.believe[:6])
 
         if self.nLM > 0:
-            lm_indices = np.arange(self.pose_size, self.pose_size + self.nLM * self.lm_size)
-            cov_lm_lm_block = self.cov[np.ix_(lm_indices, lm_indices)]
-            all_lm_variances = np.diag(cov_lm_lm_block).reshape(self.nLM, self.lm_size)
-
-            # 各ランドマークの分散の最大値を計算
-            max_variances_per_lm = np.max(all_lm_variances, axis=1)
-
-            # 閾値を超える不確実性を持つランドマークのIDを特定 (NumPy配列のID)
-            indices_to_delete_by_uncertainty = np.where(max_variances_per_lm >= 10)[0]
-
-            if len(indices_to_delete_by_uncertainty) > 0:
-
-                global_indices_to_delete = np.concatenate([
-                    np.arange(self.pose_size + lm_id * self.lm_size, self.pose_size + (lm_id + 1) * self.lm_size)
-                    for lm_id in indices_to_delete_by_uncertainty
-                ])
-
-                self.believe = np.delete(self.believe, global_indices_to_delete)
-                self.cov = np.delete(self.cov, global_indices_to_delete, axis=0)
-                self.cov = np.delete(self.cov, global_indices_to_delete, axis=1)
-                
-                self.nLM -= len(indices_to_delete_by_uncertainty)
+            # 不確実性が大きすぎるランドマーク、および生成後 prune_age フレーム経っても
+            # prune_min_hits 回未満しか再観測されないランドマーク (一過性の特徴点) を削除する
+            all_lm_variances = np.diag(self.cov)[self.pose_size:].reshape(self.nLM, self.lm_size)
+            too_uncertain = np.max(all_lm_variances, axis=1) >= 10
+            rarely_seen = ((self.frame - self.lm_born) >= self.prune_age) & (self.lm_hits < self.prune_min_hits)
+            self._delete_landmarks(too_uncertain | rarely_seen)
 
         if self.debug: print(f"camera pose : {self.believe[:6]}")
 

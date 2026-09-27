@@ -164,17 +164,15 @@ class EKF_SLAM:
         self.lm_size = 3
         self.nLM = 0
         self.md_chi = chi2.ppf(0.95, self.pose_size)
-        self.M_DIST_TH = chi2.ppf(0.01, 3)
+        self.M_DIST_TH = chi2.ppf(0.99, 3)  # 正しい対応の 99% を受理 (旧 0.01 分位点はほぼ全て棄却)
         self.color = "blue"
         self.debug = debug
 
     def motion_update(self, time_interval):
+        # ランドマークは静止しているのでプロセスノイズは姿勢ブロックにだけ加える
         motion_noise_diag = cp.array([1, 1, 1, cp.pi/6, cp.pi/6, cp.pi/6])
-        if self.nLM == 0:
-            new_cov_noise = cp.diag(motion_noise_diag)
-        else:
-            lm_variance_list = cp.ones(self.nLM * self.lm_size)
-            new_cov_noise = cp.diag(cp.concatenate((motion_noise_diag, lm_variance_list)))
+        new_cov_noise = cp.zeros_like(self.cov)
+        new_cov_noise[:self.pose_size, :self.pose_size] = cp.diag(motion_noise_diag)
 
         self.cov = self.cov + time_interval * new_cov_noise
 
