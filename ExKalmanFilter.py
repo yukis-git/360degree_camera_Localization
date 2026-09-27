@@ -2,7 +2,8 @@ import cv2
 import cv2.aruco as aruco
 import matplotlib.pyplot as plt
 import matplotlib
-matplotlib.use('Tkagg')
+try: matplotlib.use('TkAgg')
+except ImportError: pass  # tkinter が無い環境 (テスト/CI) では既定バックエンドを使う
 import matplotlib.animation as anm
 import numpy as np
 
@@ -84,6 +85,8 @@ class Obsevation_AR:
     def __init__(self):
         self.aruco_dict = aruco.getPredefinedDictionary(aruco.DICT_4X4_50)
         self.parameters = aruco.DetectorParameters()
+        # OpenCV>=4.7 では aruco.detectMarkers が廃止されたため ArucoDetector を使う
+        self.detector = aruco.ArucoDetector(self.aruco_dict, self.parameters)
         self.W = 1280
 
     def data(self, frame):
@@ -100,7 +103,7 @@ class Obsevation_AR:
         マーカーを検出し、観測値と検出したフレームを返す
         '''
         masked_frame = self.apply_mask(imput_frame)
-        corners, ids, _ = aruco.detectMarkers(masked_frame, self.aruco_dict, parameters=self.parameters)
+        corners, ids, _ = self.detector.detectMarkers(masked_frame)
         obs_data = self.calc_obs(corners, ids)
         detect_frame = aruco.drawDetectedMarkers(imput_frame, corners, ids)
         return obs_data, detect_frame

@@ -1,7 +1,8 @@
 import cv2
 import matplotlib.pyplot as plt
 import matplotlib
-matplotlib.use('Tkagg')
+try: matplotlib.use('TkAgg')
+except ImportError: pass  # tkinter が無い環境 (テスト/CI) では既定バックエンドを使う
 import matplotlib.animation as anm
 import numpy as np
 from scipy.stats import chi2

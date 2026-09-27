@@ -8,6 +8,7 @@ cap = cv2.VideoCapture(targetVideo)
 
 aruco_dict = aruco.getPredefinedDictionary(aruco.DICT_4X4_50)
 parameters = aruco.DetectorParameters()
+detector = aruco.ArucoDetector(aruco_dict, parameters)  # OpenCV>=4.7 の API
 
 while cap.isOpened():
 
@@ -25,7 +26,7 @@ while cap.isOpened():
     resized_frame = cv2.resize(frame, dim, interpolation = cv2.INTER_AREA) # リサイズ後のフレームを別名で保持
 
     # ArUcoマーカーを検出
-    corners, ids, rejectedImgPoints = aruco.detectMarkers(resized_frame, aruco_dict, parameters=parameters)
+    corners, ids, rejectedImgPoints = detector.detectMarkers(resized_frame)
 
     # 検出されたマーカーの描画とID/座標の出力
     # output_frame を resized_frame のコピーで初期化し、このフレームに描画していく
