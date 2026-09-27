@@ -51,18 +51,22 @@ cargo kani --harness <ハーネス名>   # 個別のハーネスだけ実行
 
 ## Kani 証明ハーネス一覧
 
-| ハーネス | モジュール | 検証内容 |
-|---|---|---|
-| `pixel_to_angles_f64_in_range_or_none` | pixel.rs | 有効な入力ならアジマス∈[-π,π]・仰角∈[-π/2,π/2]、パニックなし |
-| `pixel_to_angles_f32_in_range_or_none` | pixel.rs | 同上（f32） |
-| `invalid_inputs_yield_none` | pixel.rs | 範囲外ピクセル/`h`不正 → `None` |
-| `non_finite_yields_none` | pixel.rs | NaN/Inf 入力 → `None` |
-| `normalize_never_nan_for_bounded_input` | quat.rs | 正規化結果が常に有限（NaN/Infにならない） |
-| `mul_no_panic_and_finite` | quat.rs | 四元数積がパニックせず有限値を返す |
-| `from_angle_axis_guard_no_panic` | quat.rs | ゼロ判定・除算ガード部分がパニックしない（sin/cos 部分は対象外） |
-| `lm_range_is_within_state_bounds` | state_layout.rs | `lm_range` が常に状態ベクトル範囲内 |
-| `remap_after_delete_points_to_same_landmark_and_is_in_bounds` | state_layout.rs | 再採番後のIDが同じランドマークを指し、範囲内 |
-| `delete_landmarks_preserves_sizes_and_kept_entries` | state_layout.rs | 削除後の状態/共分散のサイズ整合性、姿勢ブロックの保存 |
+| ハーネス | モジュール | 検証内容 | 結果 |
+|---|---|---|---|
+| `pixel_to_angles_f64_in_range_or_none` | pixel.rs | 有効な入力ならアジマス∈[-π,π]・仰角∈[-π/2,π/2]、パニックなし | ⏱ TIMEOUT (300s, 未決着) |
+| `pixel_to_angles_f32_in_range_or_none` | pixel.rs | 同上（f32） | ⏱ TIMEOUT (300s, 未決着) |
+| `invalid_inputs_yield_none` | pixel.rs | 範囲外ピクセル/`h`不正 → `None` | ✅ VERIFIED |
+| `non_finite_yields_none` | pixel.rs | NaN/Inf 入力 → `None` | ✅ VERIFIED |
+| `normalize_never_nan_for_bounded_input` | quat.rs | 正規化結果が常に有限（NaN/Infにならない） | ✅ VERIFIED |
+| `mul_no_panic_and_finite` | quat.rs | 四元数積がパニックせず有限値を返す | ✅ VERIFIED |
+| `from_angle_axis_guard_no_panic` | quat.rs | ゼロ判定・除算ガード部分がパニックしない（sin/cos 部分は対象外） | ⏱ TIMEOUT (300s, 未決着) |
+| `lm_range_is_within_state_bounds` | state_layout.rs | `lm_range` が常に状態ベクトル範囲内 | ✅ VERIFIED |
+| `remap_after_delete_points_to_same_landmark_and_is_in_bounds` | state_layout.rs | 再採番後のIDが同じランドマークを指し、範囲内 | ✅ VERIFIED |
+| `delete_landmarks_preserves_sizes_and_kept_entries` | state_layout.rs | 削除後の状態/共分散のサイズ整合性、姿勢ブロックの保存 | ⏱ TIMEOUT (300s, 未決着) |
+
+結果は 2026-09-27 に1ハーネスずつ (`timeout 300 cargo kani --harness <名前>`) 実行したもの。
+TIMEOUT は反例ではなく「時間内に決着しなかった」ことを意味します。入力範囲をさらに絞る、
+または f64 の範囲証明を整数ピクセル座標の証明に置き換えるのが次の手です。
 
 各ハーネスの成否は `cargo kani --harness <名前>` 実行時の標準出力の末尾
 `VERIFICATION:- SUCCESSFUL` / `FAILED` で確認できます。
