@@ -1,0 +1,17 @@
+[package]
+name = "omni_loc_core"
+version = "0.1.0"
+edition = "2021"
+description = "Dependency-free pure-function core for 360-degree camera EKF-SLAM localization, ported (in progress) from the Python prototype. Intended to be reused verbatim by the future Rust port."
+license = "MIT"
+
+[dependencies]
+
+[dev-dependencies]
+
+[lib]
+name = "omni_loc_core"
+path = "src/lib.rs"
+
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = ["cfg(kani)"] }
