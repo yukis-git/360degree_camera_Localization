@@ -136,14 +136,21 @@ class Obsevation_AR:
 
 
 class ESKalmanFilter:
-    def __init__(self, map_instance):
+    def __init__(self, map_instance, q_theta=0.1, q_pos=1e-4, q_vel=0.1):
+        '''
+        q_theta : 姿勢のランダムウォーク強度 [rad^2/s]  (sqrt(0.1)~0.32 rad/sqrt(s))
+        q_pos   : 位置の追加ランダムウォーク強度 [m^2/s]
+        q_vel   : 速度のランダムウォーク強度 [(m/s)^2/s]
+        '''
         self.map_instance = map_instance 
 
         self.pose = np.zeros(10)
         self.pose[0] = 1.0       
 
         self.P = np.eye(9) * 0.1 
-        self.Q = np.eye(9) * 1e-6
+        # 連続時間のプロセスノイズ密度。予測で dt を掛けるのでフレームレートに依存しない
+        # (旧: 毎フレーム 1e-6 固定。姿勢はほぼ固定扱いとなり、カメラの回転に追従できなかった)
+        self.Q_c = np.diag([q_theta]*3 + [q_pos]*3 + [q_vel]*3)
         self.R = np.eye(3) * 1e-3
 
         self._I3 = np.eye(3)
@@ -168,7 +175,7 @@ class ESKalmanFilter:
         self.pose[7:10] = v_nom_pred
 
         F_matrix = self.matF_eskf(time_interval=time_interval)
-        self.P = F_matrix @ self.P @ F_matrix.T + self.Q
+        self.P = F_matrix @ self.P @ F_matrix.T + self.Q_c * time_interval
 
     def matF_eskf(self, time_interval):
         F = np.zeros((9, 9))
